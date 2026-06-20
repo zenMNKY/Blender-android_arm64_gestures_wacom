@@ -1,0 +1,114 @@
+name: Build Blender Android (Touch + Wacom Stylus)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - blender-v3.6-release
+    paths:
+      - 'apply_patches.py'
+      - 'GHOST_TouchGestureAndroid.h'
+      - 'GHOST_TouchGestureAndroid.cpp'
+      - 'GHOST_StylusAndroid.h'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout APP wrapper repo
+        uses: actions/checkout@v4
+        with:
+          repository: dshawshank/APP-android_arm64
+          path: APP-android_arm64
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache NDK r25c
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/android-ndk-r25c
+          key: ndk-r25c-linux
+
+      - name: Download NDK r25c
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          wget -q --show-progress https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
+          unzip -q ndk.zip
+          rm ndk.zip
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build python3 python3-dev build-essential libssl-dev pkg-config apksigner zipalign
+
+      - name: Copy patch files into source tree
+        run: |
+          cp GHOST_TouchGestureAndroid.h   intern/ghost/intern/
+          cp GHOST_TouchGestureAndroid.cpp intern/ghost/intern/
+          cp GHOST_StylusAndroid.h         intern/ghost/intern/
+
+      - name: Apply patches
+        run: python3 apply_patches.py
+
+      - name: Bundle tablet startup script
+        run: |
+          mkdir -p APP-android_arm64/app/src/main/assets/scripts/startup/bl_app_override
+          cp userpref.py APP-android_arm64/app/src/main/assets/scripts/startup/bl_app_override/userpref.py
+
+      - name: Configure CMake
+        run: |
+          NDK="${{ github.workspace }}/android-ndk-r25c"
+          mkdir -p build && cd build
+          cmake -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_GHOST_ANDROID=ON \
+            -DWITH_CYCLES=OFF \
+            -DWITH_OPENCOLLADA=OFF \
+            -DWITH_CODEC_FFMPEG=OFF \
+            -DWITH_PYTHON=ON \
+            -DWITH_PYTHON_INSTALL=OFF \
+            -DWITH_HEADLESS=OFF \
+            -DWITH_OPENMP=OFF \
+            ..
+
+      - name: Build
+        run: |
+          cd build
+          ninja -j$(nproc)
+
+      - name: Package APK
+        run: |
+          LIB="APP-android_arm64/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$LIB"
+          find build -name "libblender*.so" -exec cp {} "$LIB/" \;
+          cd APP-android_arm64
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-android-touch-stylus
+          path: APP-android_arm64/app/build/outputs/apk/**/*.apk
+          retention-days: 14
+          if-no-files-found: warn
+          
